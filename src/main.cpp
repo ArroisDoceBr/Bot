@@ -1,17 +1,20 @@
-// Auto Learn Bot - robô que aprende a fase por tentativa e erro.
+// Auto Learn Bot - robô que aprende a fase por tentativa e erro (v2).
 // Funciona no modo prática (não vale como progresso oficial).
 //
 // Como funciona:
-//  1. A fase é dividida em trechos curtos (~0.5s).
-//  2. Em cada trecho o bot testa cliques aleatórios.
-//  3. Se morre, volta pro checkpoint e testa outro padrão.
-//  4. Se passa o trecho, salva os cliques, cria um checkpoint e segue.
-//  5. Se falha demais, volta um trecho e tenta outra saída.
+//  1. A fase é dividida em trechos curtos.
+//  2. Em cada trecho o bot testa poucos cliques (toques curtos ou longos).
+//  3. Se morre, volta pro checkpoint do bot e testa outro padrão.
+//  4. Se passa o trecho (e está em lugar seguro), salva os cliques e cria
+//     um novo checkpoint (guardado pelo próprio bot, sem marcar na tela).
+//  5. Se falha demais, volta vários trechos pra trás (cada vez mais) e
+//     tenta outra saída, pra não ficar preso em checkpoint ruim.
 //  6. Ao completar a fase, entra em modo REPLAY e repete tudo sozinho.
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
+#include <algorithm>
 #include <random>
 #include <vector>
 
@@ -32,8 +35,8 @@ namespace {
         int failures = 0;
     };
 
-    constexpr int SEG_LEN = 120;  // tamanho de cada trecho em ticks (~0.5s a 240 TPS)
-    constexpr int MAX_FAILS = 80; // falhas antes de voltar um trecho
+    constexpr int SEG_LEN = 120;  // tamanho de cada trecho
+    constexpr int MAX_FAILS = 30; // falhas antes de voltar trechos
 
     Mode g_mode = Mode::Off;
     int g_frame = 0;
@@ -43,26 +46,64 @@ namespace {
     size_t g_trialIdx = 0;
     size_t g_replayIdx = 0;
     std::vector<Segment> g_segs;
+    std::vector<CheckpointObject*> g_cps; // checkpoints do bot (um por trecho, menos o primeiro)
+    int g_backDepth = 1;  // quantos trechos voltar quando travar
+    int g_bestFrame = 0;  // ponto mais longe que já chegou
     std::mt19937 g_rng{std::random_device{}()};
 
-    // Gera um padrão aleatório de cliques para o trecho atual.
+    int rnd(int a, int b) {
+        return std::uniform_int_distribution<int>(a, b)(g_rng);
+    }
+
+    bool isFlying(PlayerObject* p) {
+        return p->m_isShip || p->m_isBird || p->m_isDart || p->m_isSwing;
+    }
+
+    void clearCheckpoints() {
+        for (auto cp : g_cps) cp->release();
+        g_cps.clear();
+    }
+
+    // Gera poucos cliques para o trecho atual.
     void makeTrial() {
         g_trial.clear();
         g_trialIdx = 0;
         if (g_segs.empty()) return;
 
         auto const& seg = g_segs.back();
-        static const float probs[] = {0.0f, 0.004f, 0.01f, 0.02f, 0.04f};
-        std::uniform_int_distribution<int> pick(0, 4);
-        std::uniform_real_distribution<float> chance(0.f, 1.f);
+        auto pl = PlayLayer::get();
+        bool flying = pl && pl->m_player1 && isFlying(pl->m_player1);
 
-        float p = probs[pick(g_rng)];
-        bool h = seg.startHolding;
-        for (int t = seg.startFrame + 1; t < seg.startFrame + SEG_LEN; ++t) {
-            if (chance(g_rng) < p) {
-                h = !h;
-                g_trial.push_back({t, h});
-            }
+        int from = seg.startFrame + 1;
+        int to = seg.startFrame + SEG_LEN;
+        int t = from;
+
+        // se o botão já estava apertado, solta em algum momento
+        if (seg.startHolding) {
+            t = from + (rnd(0, 99) < 60 ? rnd(0, 20) : rnd(0, SEG_LEN - 2));
+            g_trial.push_back({t, false});
+            t += 1;
+        }
+
+        // às vezes não faz nada (deixa o jogo correr)
+        if (!flying && rnd(0, 99) < 15) return;
+
+        int taps;
+        if (flying) {
+            taps = rnd(1, 5);
+        } else {
+            int r = rnd(0, 99);
+            taps = r < 70 ? 1 : (r < 95 ? 2 : 3);
+        }
+
+        for (int i = 0; i < taps && t < to; ++i) {
+            int start = rnd(t, to - 1);
+            int dur;
+            if (flying) dur = rnd(3, 30);
+            else dur = rnd(0, 99) < 70 ? rnd(2, 12) : rnd(20, 100);
+            g_trial.push_back({start, true});
+            g_trial.push_back({start + dur, false});
+            t = start + dur + 1;
         }
     }
 
@@ -95,11 +136,18 @@ namespace {
         }
     }
 
-    // O trecho foi vencido: salva os cliques, cria checkpoint e começa o próximo.
-    void commitSegment(PlayLayer* pl) {
+    // Salva na gravação só os cliques que já aconteceram neste trecho.
+    void saveExecutedInputs() {
         auto const seg = g_segs.back();
         if (seg.startHolding) g_macro.push_back({seg.startFrame, true});
-        for (auto const& e : g_trial) g_macro.push_back(e);
+        for (size_t i = 0; i < g_trialIdx && i < g_trial.size(); ++i) {
+            g_macro.push_back(g_trial[i]);
+        }
+    }
+
+    // O trecho foi vencido: salva os cliques, cria checkpoint e começa o próximo.
+    void commitSegment(PlayLayer* pl) {
+        saveExecutedInputs();
 
         Segment next;
         next.startFrame = g_frame;
@@ -108,7 +156,13 @@ namespace {
         g_segs.push_back(next);
 
         auto cp = pl->createCheckpoint();
-        pl->storeCheckpoint(cp);
+        cp->retain();
+        g_cps.push_back(cp);
+
+        if (g_frame > g_bestFrame) {
+            g_bestFrame = g_frame;
+            g_backDepth = 1;
+        }
 
         makeTrial();
     }
@@ -147,6 +201,7 @@ class $modify(BotPlayLayer, PlayLayer) {
         g_mode = Mode::Off;
         g_segs.clear();
         g_macro.clear();
+        clearCheckpoints();
 
         auto menu = CCMenu::create();
         menu->setPosition({0.f, 0.f});
@@ -166,12 +221,14 @@ class $modify(BotPlayLayer, PlayLayer) {
     void onBotButton(CCObject*) {
         if (g_mode == Mode::Off) {
             if (!m_isPracticeMode) this->togglePracticeMode(true);
-            while (m_checkpointArray->count() > 0) m_checkpointArray->removeLastObject();
 
             g_segs.clear();
             g_macro.clear();
+            clearCheckpoints();
             g_frame = 0;
             g_holding = false;
+            g_bestFrame = 0;
+            g_backDepth = 1;
             g_mode = Mode::Learning;
             this->resetLevelFromStart();
         } else {
@@ -193,23 +250,37 @@ class $modify(BotPlayLayer, PlayLayer) {
 
         if (g_segs.empty()) {
             g_macro.clear();
+            clearCheckpoints();
+            g_bestFrame = 0;
+            g_backDepth = 1;
             g_segs.push_back(Segment{});
         } else if (g_frame > g_segs.back().startFrame) {
             g_segs.back().failures++;
         }
 
-        // falhou demais neste trecho: volta um trecho e tenta outra saída
+        // falhou demais: volta alguns trechos (cada vez mais) e tenta outra saída
         if (g_segs.back().failures >= MAX_FAILS && g_segs.size() > 1) {
-            g_segs.pop_back();
+            int pops = std::min<int>(g_backDepth, (int)g_segs.size() - 1);
+            for (int i = 0; i < pops; ++i) {
+                g_segs.pop_back();
+                if (!g_cps.empty()) {
+                    g_cps.back()->release();
+                    g_cps.pop_back();
+                }
+            }
             g_macro.resize(g_segs.back().committedCount);
             g_segs.back().failures = MAX_FAILS / 2;
-            g_frame = g_segs.back().startFrame;
-            m_checkpointArray->removeLastObject();
-            PlayLayer::resetLevel();
+            g_backDepth++;
         }
 
         g_frame = g_segs.back().startFrame;
         g_holding = false;
+
+        // volta pro checkpoint do bot (o jogo reiniciou do começo)
+        if (g_segs.size() > 1 && !g_cps.empty()) {
+            this->loadFromCheckpoint(g_cps.back());
+        }
+
         makeTrial();
     }
 
@@ -217,24 +288,26 @@ class $modify(BotPlayLayer, PlayLayer) {
         PlayLayer::postUpdate(dt);
 
         if (g_mode != Mode::Learning || g_segs.empty()) return;
-        if (m_player1->m_isDead) return;
+        auto p = m_player1;
+        if (!p || p->m_isDead) return;
 
-        if (g_frame >= g_segs.back().startFrame + SEG_LEN) {
+        int elapsed = g_frame - g_segs.back().startFrame;
+        if (elapsed < SEG_LEN) return;
+
+        // só cria checkpoint em lugar seguro: no chão (ou voando)
+        bool stable = isFlying(p) || p->m_isOnGround;
+        if (stable || elapsed >= SEG_LEN * 2) {
             commitSegment(this);
         }
     }
 
     void levelComplete() {
         if (g_mode == Mode::Learning && !g_segs.empty()) {
-            auto const seg = g_segs.back();
-            if (seg.startHolding) g_macro.push_back({seg.startFrame, true});
-            for (auto const& e : g_trial) {
-                if (e.frame <= g_frame) g_macro.push_back(e);
-            }
+            saveExecutedInputs();
 
             g_mode = Mode::Replay;
             g_segs.clear();
-            while (m_checkpointArray->count() > 0) m_checkpointArray->removeLastObject();
+            clearCheckpoints();
 
             this->refreshLabel();
             Notification::create("O bot aprendeu a fase!", NotificationIcon::Success)->show();
@@ -245,6 +318,7 @@ class $modify(BotPlayLayer, PlayLayer) {
     void onQuit() {
         g_mode = Mode::Off;
         g_segs.clear();
+        clearCheckpoints();
         PlayLayer::onQuit();
     }
 };
