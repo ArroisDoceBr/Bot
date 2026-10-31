@@ -120,10 +120,10 @@ namespace {
 }
 
 class $modify(BotGJBaseGameLayer, GJBaseGameLayer) {
-    void processCommands(float dt) {
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         bool active = g_mode != Mode::Off && isActivePlayLayer(this);
         if (active) tickInput(this);
-        GJBaseGameLayer::processCommands(dt);
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         if (active) g_frame++;
     }
 };
@@ -166,7 +166,7 @@ class $modify(BotPlayLayer, PlayLayer) {
     void onBotButton(CCObject*) {
         if (g_mode == Mode::Off) {
             if (!m_isPracticeMode) this->togglePracticeMode(true);
-            while (m_checkpointArray->count() > 0) this->removeLastCheckpoint();
+            while (m_checkpointArray->count() > 0) m_checkpointArray->removeLastObject();
 
             g_segs.clear();
             g_macro.clear();
@@ -204,7 +204,7 @@ class $modify(BotPlayLayer, PlayLayer) {
             g_macro.resize(g_segs.back().committedCount);
             g_segs.back().failures = MAX_FAILS / 2;
             g_frame = g_segs.back().startFrame;
-            this->removeLastCheckpoint();
+            m_checkpointArray->removeLastObject();
             PlayLayer::resetLevel();
         }
 
@@ -234,7 +234,7 @@ class $modify(BotPlayLayer, PlayLayer) {
 
             g_mode = Mode::Replay;
             g_segs.clear();
-            while (m_checkpointArray->count() > 0) this->removeLastCheckpoint();
+            while (m_checkpointArray->count() > 0) m_checkpointArray->removeLastObject();
 
             this->refreshLabel();
             Notification::create("O bot aprendeu a fase!", NotificationIcon::Success)->show();
