@@ -8,7 +8,6 @@
 #include <vector>
 #include <map>
 #include <set>
-#include <unordered_map>
 #include <memory>
 #include <cmath>
 #include <cstdio>
@@ -57,71 +56,97 @@ static std::string numStr(float v) {
     return std::string(buf);
 }
 
-// gira o vetor (x,y) em graus no sentido horario (como o GD)
-static void rotCW(float x, float y, float deg, float& ox, float& oy) {
-    float r = deg * 3.14159265f / 180.f;
-    float c = std::cos(r);
-    float s = std::sin(r);
-    ox = x * c + y * s;
-    oy = -x * s + y * c;
+// troca o valor de uma chave (ou adiciona se nao existir)
+static std::string setKey(std::string const& raw, int key, std::string const& val) {
+    auto tok = splitStr(raw, ',');
+    std::string out;
+    bool found = false;
+    for (size_t i = 0; i + 1 < tok.size(); i += 2) {
+        int k = toInt(tok[i], -1);
+        std::string v = tok[i + 1];
+        if (k == key) {
+            v = val;
+            found = true;
+        }
+        if (!out.empty()) out += ',';
+        out += tok[i];
+        out += ',';
+        out += v;
+    }
+    if (!found) {
+        if (!out.empty()) out += ',';
+        out += std::to_string(key);
+        out += ',';
+        out += val;
+    }
+    return out;
+}
+
+// fica so com o visual (cores etc.): tira id, posicao, rotacao, flip, grupos, hitbox, escala, camada
+static std::string stripSkin(std::string const& raw) {
+    auto tok = splitStr(raw, ',');
+    std::string out;
+    for (size_t i = 0; i + 1 < tok.size(); i += 2) {
+        int k = toInt(tok[i], -1);
+        switch (k) {
+            case 1: case 2: case 3: case 4: case 5: case 6:
+            case 24: case 25: case 32: case 33: case 108: case 121:
+            case 57: case 274: case 442:
+            case 51: case 71: case 395:
+                continue;
+            default:
+                break;
+        }
+        if (!out.empty()) out += ',';
+        out += tok[i];
+        out += ',';
+        out += tok[i + 1];
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------
 // Listas de IDs
 // ---------------------------------------------------------------
-
-// Espinhos e serras: sao as "ancoras" do estilo
-static bool isAnchor(int id) {
+static bool isSpike(int id) {
     static const std::set<int> a = {
-        8, 9, 39, 61, 103, 392,        // espinhos
-        363, 364, 365,                 // espinhos de planta
-        88, 89, 98, 397, 398, 399      // serras
+        8, 9, 39, 61, 103, 392,
+        363, 364, 365,
+        88, 89, 98, 397, 398, 399
     };
     return a.count(id) > 0;
 }
 
-// Objetos que mudam o gameplay: nunca copiar como decoracao
-static bool isBlocked(int id) {
-    static const std::set<int> blocked = {
-        31,
-        10, 11,
-        12, 13, 47, 111, 660, 745, 1331, 1933,
-        45, 46,
-        99, 101,
-        286, 287,
-        200, 201, 202, 203, 1334,
-        747,
-        36, 84, 141, 1022, 1330, 1333,
-        1704, 1751,
-        35, 67, 140, 1332,
-        142, 1329,
-        2063,
-        3600,
-        1917, 1932, 1934, 1935, 2066,
-        1595, 1611, 1811, 1815, 1816, 1817,
-        3614, 3615, 3617, 3619, 3620, 3641
-    };
-    return blocked.count(id) > 0;
+static bool isModePortal(int id) {
+    static const std::set<int> p = { 12, 13, 47, 111, 660, 745, 1331, 1933 };
+    return p.count(id) > 0;
 }
 
-// Triggers globais que vale copiar (nao dependem de grupos)
-static bool isGlobalEffect(int id, int pulseMode) {
+// efeitos que dao pra copiar sem depender de grupos
+static bool isCopyableEffect(int id, int pulseMode, bool shake) {
     if (id == 899) return true;                    // cor
     if (id == 1006 && pulseMode == 0) return true; // pulse em canal de cor
-    if (id == 1520) return true;                   // shake
     if (id == 1818 || id == 1819) return true;     // efeito de fundo
+    if (id == 1520 && shake) return true;          // shake
     return false;
 }
 
+static bool isTriggerLike(int id) {
+    return id == 899 || id == 901 || id == 1006 || id == 1007 || id == 1049 ||
+           id == 1268 || id == 1346 || id == 1347 || id == 1520 || id == 1585 ||
+           id == 1616 || id == 1818 || id == 1819 || id == 2067 || id == 3016 ||
+           id == 3600 || id == 31;
+}
+
 // ---------------------------------------------------------------
-// Objeto lido da fase original
+// Leitura de objeto da fase original
 // ---------------------------------------------------------------
 struct SObj {
     int id = 0;
-    float x = 0.f, y = 0.f, rot = 0.f;
-    bool flipY = false;
-    bool trig = false;
+    float x = 0.f, y = 0.f;
     int pulseMode = 0;
+    bool touch = false;
+    bool spawn = false;
     std::string raw;
 };
 
@@ -135,10 +160,9 @@ static bool parseObj(std::string const& s, SObj& o) {
             case 1: o.id = toInt(v); break;
             case 2: o.x = toFloat(v); break;
             case 3: o.y = toFloat(v); break;
-            case 5: o.flipY = (toInt(v) == 1); break;
-            case 6: o.rot = toFloat(v); break;
-            case 36: o.trig = (toInt(v) == 1); break;
+            case 11: o.touch = (toInt(v) == 1); break;
             case 52: o.pulseMode = toInt(v); break;
+            case 62: o.spawn = (toInt(v) == 1); break;
             default: break;
         }
     }
@@ -147,47 +171,36 @@ static bool parseObj(std::string const& s, SObj& o) {
     return true;
 }
 
-static float effRot(SObj const& o) {
-    return o.rot + (o.flipY ? 180.f : 0.f);
-}
-
-// Remove posicao, rotacao, grupos e hitbox; sobra o visual (cores, camada, etc.)
-static std::string stripBase(std::string const& raw, bool dropFlips) {
-    auto tok = splitStr(raw, ',');
-    std::string out;
-    for (size_t i = 0; i + 1 < tok.size(); i += 2) {
-        int k = toInt(tok[i], -1);
-        switch (k) {
-            case 2: case 3: case 6:
-            case 57: case 274: case 442:
-            case 51: case 71: case 395:
-            case 33: case 108: case 121:
-                continue;
-            case 4: case 5:
-                if (dropFlips) continue;
-                break;
-            default:
-                break;
+static std::string bestOf(std::map<std::string, int> const& m) {
+    std::string best;
+    int bc = 0;
+    for (auto& kv : m) {
+        if (kv.second > bc) {
+            bc = kv.second;
+            best = kv.first;
         }
-        if (!out.empty()) out += ',';
-        out += tok[i];
-        out += ',';
-        out += tok[i + 1];
     }
-    return out;
+    return best;
 }
 
 // ---------------------------------------------------------------
-// Modelos de estilo
+// Mapeamento de tempo (x da original -> x da sua fase)
 // ---------------------------------------------------------------
-struct Piece {
-    std::string base;
-    float lx = 0.f, ly = 0.f, rr = 0.f;
-};
+struct XMap {
+    std::vector<std::pair<float, float>> pts; // (x original, x seu), crescente
 
-struct Templ {
-    std::vector<Piece> pieces;
-    int count = 0;
+    float map(float x) const {
+        if (pts.empty()) return x;
+        if (x <= pts.front().first) return x - pts.front().first + pts.front().second;
+        for (size_t i = 0; i + 1 < pts.size(); ++i) {
+            float a = pts[i].first, b = pts[i + 1].first;
+            if (x >= a && x < b) {
+                float t = (x - a) / (b - a);
+                return pts[i].second + t * (pts[i + 1].second - pts[i].second);
+            }
+        }
+        return pts.back().second + (x - pts.back().first);
+    }
 };
 
 // ---------------------------------------------------------------
@@ -265,7 +278,7 @@ public:
 };
 
 // ---------------------------------------------------------------
-// Download + processamento
+// Processamento
 // ---------------------------------------------------------------
 static TaskHolder<web::WebResponse> s_holder;
 
@@ -275,16 +288,18 @@ static void showError(std::string const& msg) {
 
 static void processLevel(Ref<LevelEditorLayer> editor, std::string const& decoded) {
     auto mod = Mod::get();
-    bool trig = mod->getSettingValue<bool>("copy-triggers");
     bool colors = mod->getSettingValue<bool>("copy-colors");
     bool bg = mod->getSettingValue<bool>("copy-bg");
+    bool skin = mod->getSettingValue<bool>("copy-spike-skin");
+    bool effects = mod->getSettingValue<bool>("copy-effects");
+    bool shake = mod->getSettingValue<bool>("copy-shake");
+    bool align = mod->getSettingValue<bool>("align-portals");
+    bool delMine = mod->getSettingValue<bool>("delete-my-color-triggers");
+    int zorder = static_cast<int>(mod->getSettingValue<int64_t>("overlay-zorder"));
     size_t maxObjs = static_cast<size_t>(mod->getSettingValue<int64_t>("max-objects"));
     size_t chunkSize = static_cast<size_t>(
         std::max<int64_t>(20, mod->getSettingValue<int64_t>("chunk-size"))
     );
-    float radius = static_cast<float>(mod->getSettingValue<int64_t>("radius"));
-    size_t maxPer = static_cast<size_t>(mod->getSettingValue<int64_t>("max-per-spike"));
-    size_t nTempl = static_cast<size_t>(std::max<int64_t>(1, mod->getSettingValue<int64_t>("templates")));
 
     // 1) le a fase original
     auto segs = splitStr(decoded, ';');
@@ -297,165 +312,133 @@ static void processLevel(Ref<LevelEditorLayer> editor, std::string const& decode
         SObj o;
         if (parseObj(segs[i], o)) objs.push_back(std::move(o));
     }
+    if (objs.empty()) {
+        showError("A fase original esta vazia");
+        return;
+    }
 
-    // 2) separa ancoras e decoracao (grade espacial)
-    float cell = std::max(radius, 1.f);
-    auto cellKey = [&](int cx, int cy) -> long long {
-        return static_cast<long long>(cx) * 1000003LL + static_cast<long long>(cy);
-    };
-    std::unordered_map<long long, std::vector<int>> grid;
-    std::map<int, std::vector<int>> anchorsById;
+    // 2) visual dos espinhos (o mais comum da fase original)
+    std::map<int, std::map<std::string, int>> byId;
+    std::map<std::string, int> allSkins;
+    std::vector<std::pair<float, int>> origPortals;
+    float origEnd = 0.f;
 
-    for (int i = 0; i < static_cast<int>(objs.size()); ++i) {
-        auto const& o = objs[i];
-        if (isAnchor(o.id)) {
-            anchorsById[o.id].push_back(i);
+    for (auto const& o : objs) {
+        if (isSpike(o.id)) {
+            std::string sk = stripSkin(o.raw);
+            byId[o.id][sk]++;
+            allSkins[sk]++;
+        }
+        if (isModePortal(o.id)) origPortals.push_back({o.x, o.id});
+        if (!isTriggerLike(o.id)) origEnd = std::max(origEnd, o.x);
+    }
+    std::sort(origPortals.begin(), origPortals.end());
+    std::string anySkin = bestOf(allSkins);
+
+    // 3) le a sua fase
+    CCArray* arr = editor->m_objects;
+    std::vector<GameObject*> mine;
+    if (arr) {
+        for (int i = 0; i < arr->count(); ++i) {
+            auto* o = static_cast<GameObject*>(arr->objectAtIndex(i));
+            if (o) mine.push_back(o);
+        }
+    }
+    if (mine.empty()) {
+        showError("Sua fase esta vazia");
+        return;
+    }
+
+    float userEnd = 0.f;
+    std::vector<std::pair<float, int>> userPortals;
+    std::vector<GameObject*> myColorTriggers;
+    for (auto* o : mine) {
+        int id = o->m_objectID;
+        if (id == 899) {
+            myColorTriggers.push_back(o);
             continue;
         }
-        if (o.trig || isBlocked(o.id)) continue;
-        int cx = static_cast<int>(std::floor(o.x / cell));
-        int cy = static_cast<int>(std::floor(o.y / cell));
-        grid[cellKey(cx, cy)].push_back(i);
+        if (!isTriggerLike(id)) userEnd = std::max(userEnd, o->getPositionX());
+        if (isModePortal(id)) userPortals.push_back({o->getPositionX(), id});
     }
+    std::sort(userPortals.begin(), userPortals.end());
+    if (userEnd <= 0.f) userEnd = 1.f;
+    if (origEnd <= 0.f) origEnd = 1.f;
 
-    if (anchorsById.empty()) {
-        showError("A fase original nao tem espinhos/serras conhecidos");
-        return;
-    }
-
-    // 3) monta modelos
-    auto buildTempl = [&](int ai, size_t cap) -> Templ {
-        Templ t;
-        auto const& a = objs[ai];
-        float ar = effRot(a);
-
-        std::vector<std::pair<float, int>> near;
-        int cx = static_cast<int>(std::floor(a.x / cell));
-        int cy = static_cast<int>(std::floor(a.y / cell));
-        for (int dx = -1; dx <= 1; ++dx) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                auto it = grid.find(cellKey(cx + dx, cy + dy));
-                if (it == grid.end()) continue;
-                for (int j : it->second) {
-                    float ddx = objs[j].x - a.x;
-                    float ddy = objs[j].y - a.y;
-                    float d2 = ddx * ddx + ddy * ddy;
-                    if (d2 <= radius * radius) near.push_back({d2, j});
-                }
+    // 4) mapa de tempo
+    XMap xm;
+    xm.pts.push_back({0.f, 0.f});
+    if (align) {
+        size_t j = 0;
+        float lastO = 0.f, lastU = 0.f;
+        for (auto& up : userPortals) {
+            size_t k = j;
+            while (k < origPortals.size() && origPortals[k].second != up.second) ++k;
+            if (k >= origPortals.size()) continue;
+            float ox = origPortals[k].first;
+            float ux = up.first;
+            if (ox > lastO && ux > lastU) {
+                xm.pts.push_back({ox, ux});
+                lastO = ox;
+                lastU = ux;
             }
+            j = k + 1;
         }
-        t.count = static_cast<int>(near.size());
-        std::sort(near.begin(), near.end());
-        if (near.size() > cap) near.resize(cap);
-
-        // o proprio espinho da fase original (visual, por cima do seu)
-        Piece self;
-        self.base = stripBase(a.raw, true);
-        t.pieces.push_back(std::move(self));
-
-        for (auto& pr : near) {
-            auto const& d = objs[pr.second];
-            Piece p;
-            p.base = stripBase(d.raw, false);
-            float lx, ly;
-            rotCW(d.x - a.x, d.y - a.y, -ar, lx, ly);
-            p.lx = lx;
-            p.ly = ly;
-            p.rr = d.rot - ar;
-            t.pieces.push_back(std::move(p));
-        }
-        return t;
-    };
-
-    std::map<int, std::vector<Templ>> templs;
-    std::vector<Templ> anyTempls;
-
-    for (auto& kv : anchorsById) {
-        auto& list = kv.second;
-        size_t step = std::max<size_t>(1, list.size() / 300);
-        std::vector<Templ> valid, loose;
-        for (size_t i = 0; i < list.size(); i += step) {
-            Templ t = buildTempl(list[i], maxPer);
-            if (t.count >= 3 && t.count <= static_cast<int>(maxPer)) valid.push_back(std::move(t));
-            else if (t.count >= 1) loose.push_back(std::move(t));
-        }
-        auto& src = valid.empty() ? loose : valid;
-        std::vector<Templ> chosen;
-        if (!src.empty()) {
-            size_t take = std::min(nTempl, src.size());
-            for (size_t k = 0; k < take; ++k) {
-                size_t idx = (take == 1) ? 0 : (k * (src.size() - 1)) / (take - 1);
-                chosen.push_back(src[idx]);
-            }
-        }
-        if (!chosen.empty()) {
-            if (anyTempls.empty()) anyTempls = chosen;
-            templs[kv.first] = std::move(chosen);
-        }
+        if (origEnd > lastO && userEnd > lastU) xm.pts.push_back({origEnd, userEnd});
+    } else {
+        xm.pts.push_back({origEnd, userEnd});
     }
 
-    if (anyTempls.empty()) {
-        showError("Nao achei decoracao perto dos espinhos da fase original");
-        return;
-    }
-
-    // 4) aplica nos espinhos da sua fase
+    // 5) monta o que sera colado
     std::vector<std::string> good;
-    float userMaxX = 0.f;
-    int userAnchors = 0;
-    std::map<int, size_t> counter;
 
-    CCArrayExt<GameObject*> mine(editor->m_objects);
-    for (auto* o : mine) {
-        if (!o) continue;
-        userMaxX = std::max(userMaxX, o->getPositionX());
-    }
-    for (auto* o : mine) {
-        if (!o) continue;
-        int id = o->m_objectID;
-        if (!isAnchor(id)) continue;
-        if (good.size() >= maxObjs) break;
-
-        std::vector<Templ>* list = &anyTempls;
-        auto it = templs.find(id);
-        if (it != templs.end()) list = &it->second;
-
-        Templ& t = (*list)[counter[id]++ % list->size()];
-        float ux = o->getPositionX();
-        float uy = o->getPositionY();
-        float ur = o->getRotation();
-        userAnchors++;
-
-        for (auto& p : t.pieces) {
-            float ox, oy;
-            rotCW(p.lx, p.ly, ur, ox, oy);
-            std::string s = p.base;
-            s += ",2," + numStr(ux + ox);
-            s += ",3," + numStr(uy + oy);
-            s += ",6," + numStr(ur + p.rr);
+    if (skin && !anySkin.empty()) {
+        for (auto* o : mine) {
+            int id = o->m_objectID;
+            if (!isSpike(id)) continue;
+            if (good.size() >= maxObjs) break;
+            std::string sk = anySkin;
+            auto it = byId.find(id);
+            if (it != byId.end()) sk = bestOf(it->second);
+            std::string s = setKey(sk, 1, std::to_string(id));
+            s += ",2," + numStr(o->getPositionX());
+            s += ",3," + numStr(o->getPositionY());
+            s += ",6," + numStr(o->getRotation());
+            s += ",25," + std::to_string(zorder);
             s += ",121,1";
             good.push_back(std::move(s));
         }
     }
 
-    if (userAnchors == 0) {
-        showError("Nao achei espinhos/serras na sua fase");
-        return;
+    int effCount = 0;
+    if (effects) {
+        for (auto const& o : objs) {
+            if (!isCopyableEffect(o.id, o.pulseMode, shake)) continue;
+            if (o.touch || o.spawn) continue;
+            if (good.size() >= maxObjs) break;
+            float nx = xm.map(o.x);
+            if (nx > userEnd + 300.f) continue;
+            good.push_back(setKey(o.raw, 2, numStr(nx)));
+            effCount++;
+        }
     }
 
-    // 5) efeitos globais, so ate perto do fim da sua fase
-    if (trig) {
-        for (auto const& o : objs) {
-            if (!o.trig) continue;
-            if (!isGlobalEffect(o.id, o.pulseMode)) continue;
-            if (o.x > userMaxX + 300.f) continue;
-            good.push_back(o.raw);
+    // 6) apaga os seus triggers de cor (so se tem efeitos novos pra colocar no lugar)
+    if (effects && delMine && effCount > 0) {
+        for (auto* o : myColorTriggers) {
+            editor->removeObject(o, true);
         }
     }
 
     applyHeader(editor, header, colors, bg);
 
-    // 6) cola em partes
+    if (good.empty()) {
+        Notification::create("Cores e fundo aplicados. Nada pra colar.",
+            NotificationIcon::Success, 4.f)->show();
+        return;
+    }
+
+    // 7) cola em partes
     std::vector<std::string> chunks;
     std::string cur;
     size_t n = 0;
@@ -563,7 +546,7 @@ class $modify(DecorPauseLayer, EditorPauseLayer) {
         auto holder = std::make_shared<TextInput*>(nullptr);
 
         auto alert = createQuickPopup(
-            "Copiar decoracao",
+            "Copiar tema",
             "Digite o ID da fase:\n\n\n",
             "Cancelar", "Copiar",
             [editor = Ref<LevelEditorLayer>(m_editorLayer), holder](FLAlertLayer*, bool btn2) {
