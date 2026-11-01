@@ -8,7 +8,6 @@
 #include <vector>
 #include <map>
 #include <set>
-#include <unordered_map>
 #include <memory>
 #include <cstdlib>
 #include <algorithm>
@@ -16,7 +15,7 @@
 using namespace geode::prelude;
 
 // ---------------------------------------------------------------
-// Utilidades de texto
+// Utilidades
 // ---------------------------------------------------------------
 static std::vector<std::string> splitStr(std::string const& s, char d) {
     std::vector<std::string> out;
@@ -42,13 +41,11 @@ static int toInt(std::string const& s, int def = 0) {
 }
 
 // ---------------------------------------------------------------
-// Renumeracao de grupos e canais de cor
+// Renumeracao de grupos
 // ---------------------------------------------------------------
 struct Remapper {
     std::map<int, int> groups;
-    std::map<int, int> chans;
     int nextGroup = 4000;
-    int nextChan = 500;
 
     int group(int g) {
         if (g <= 0) return g;
@@ -57,16 +54,6 @@ struct Remapper {
         if (nextGroup > 9999) return g;
         int n = nextGroup++;
         groups[g] = n;
-        return n;
-    }
-
-    int chan(int c) {
-        if (c < 1 || c > 999) return c; // canais especiais (1000+) ficam iguais
-        auto it = chans.find(c);
-        if (it != chans.end()) return it->second;
-        if (nextChan > 999) return c;
-        int n = nextChan++;
-        chans[c] = n;
         return n;
     }
 };
@@ -83,48 +70,47 @@ static std::string mapGroupList(std::string const& v, Remapper& rm) {
 }
 
 // ---------------------------------------------------------------
-// Classificacao de objetos
-// 0 = descartar, 1 = decoracao, 2 = hazard (vira visual), 3 = trigger de efeito
+// Listas de IDs
 // ---------------------------------------------------------------
-static int classifyObject(int id) {
-    // Triggers de efeito (lista pequena, so os que tenho certeza)
-    static const std::set<int> effectTriggers = {
-        899,  // cor
-        901,  // move
-        1006, // pulse
-        1007, // alpha
-        1049, // toggle
-        1268, // spawn
-        1346, // rotate
-        1347, // follow
-        1520, // shake
-        1585, // animate
-        2067, // scale
-        1818, // bg effect on
-        1819  // bg effect off
+
+// Objetos que mudam o gameplay: NAO copiar
+static bool isBlocked(int id) {
+    static const std::set<int> blocked = {
+        31,                                   // start pos
+        10, 11,                               // portais de gravidade
+        12, 13, 47, 111, 660, 745, 1331, 1933,// portais de modo
+        45, 46,                               // espelho
+        99, 101,                              // tamanho
+        286, 287,                             // dual
+        200, 201, 202, 203, 1334,             // velocidade
+        747,                                  // teleporte
+        36, 84, 141, 1022, 1330, 1333,        // orbs
+        1704, 1751,                           // orbs dash
+        35, 67, 140, 1332,                    // pads
+        142, 1329,                            // moedas
+        2063,                                 // checkpoint
+        3600,                                 // end trigger
+        1917, 1932, 1934, 1935, 2066,         // reverse, player control, song, time warp, gravity
+        1595, 1611, 1811, 1815, 1816, 1817,   // touch, count, colisao, pickup
+        3614, 3615, 3617, 3619, 3620, 3641    // tempo e item edit
     };
-    if (effectTriggers.count(id)) return 3;
-    if (id == 31) return 0; // start pos
+    return blocked.count(id) > 0;
+}
 
-    static std::unordered_map<int, int> cache;
-    auto it = cache.find(id);
-    if (it != cache.end()) return it->second;
-
-    int kind = 0;
-    auto* obj = GameObject::createWithKey(id);
-    if (obj) {
-        if (obj->m_objectType == GameObjectType::Decoration) kind = 1;
-        else if (obj->m_objectType == GameObjectType::Hazard) kind = 2;
-    }
-    cache[id] = kind;
-    return kind;
+// Triggers de efeito conhecidos (nao recebem "sem hitbox")
+static bool isEffectTrigger(int id) {
+    static const std::set<int> trig = {
+        899, 901, 1006, 1007, 1049, 1268, 1346, 1347, 1520,
+        1585, 2067, 1818, 1819, 1616, 3016
+    };
+    return trig.count(id) > 0;
 }
 
 // ---------------------------------------------------------------
 // Converte 1 objeto da string da fase
 // ---------------------------------------------------------------
 static bool convertObject(
-    std::string const& obj, Remapper& rm, bool spikes, bool trig, std::string& out
+    std::string const& obj, Remapper& rm, bool trig, std::string& out
 ) {
     auto tok = splitStr(obj, ',');
     if (tok.size() < 4) return false;
@@ -137,11 +123,10 @@ static bool convertObject(
         if (k == 1) id = toInt(tok[i + 1]);
     }
     if (id <= 0) return false;
+    if (isBlocked(id)) return false;
 
-    int kind = classifyObject(id);
-    if (kind == 0) return false;
-    if (kind == 3 && !trig) return false;
-    if (kind == 2 && !spikes) return false;
+    bool isTrig = isEffectTrigger(id);
+    if (isTrig && !trig) return false;
 
     int pulseMode = 0;
     bool hasNoTouch = false;
@@ -160,20 +145,13 @@ static bool convertObject(
                 v = mapGroupList(v, rm);
                 break;
             case 51:
-                if (id == 1006 && pulseMode == 0) v = std::to_string(rm.chan(toInt(v)));
-                else v = std::to_string(rm.group(toInt(v)));
+                // pulse em canal de cor (modo 0) nao muda; o resto e grupo
+                if (id == 1006 && pulseMode == 0) break;
+                v = std::to_string(rm.group(toInt(v)));
                 break;
             case 71:
             case 395:
                 v = std::to_string(rm.group(toInt(v)));
-                break;
-            case 21:
-            case 22:
-                v = std::to_string(rm.chan(toInt(v)));
-                break;
-            case 23:
-            case 50:
-                if (id == 899) v = std::to_string(rm.chan(toInt(v)));
                 break;
             default:
                 break;
@@ -183,65 +161,34 @@ static bool convertObject(
         out += ',';
         out += v;
     }
-    if (kind == 2 && !hasNoTouch) out += ",121,1"; // sem hitbox
+    // sem hitbox em tudo que nao e trigger de efeito
+    if (!isTrig && !hasNoTouch) out += ",121,1";
     return true;
 }
 
 // ---------------------------------------------------------------
-// Cores do tema -> triggers de cor
+// Aplica cores e fundo/chao na configuracao da fase
 // ---------------------------------------------------------------
-static std::string getOr(std::map<int, std::string> const& m, int k, std::string const& def) {
-    auto it = m.find(k);
-    if (it == m.end() || it->second.empty()) return def;
-    return it->second;
-}
-
-static std::vector<std::string> buildColorTriggers(std::string const& header, Remapper& rm) {
-    std::vector<std::string> out;
+static void applyHeader(
+    LevelEditorLayer* editor, std::string const& header, bool colors, bool bg
+) {
     auto parts = splitStr(header, ',');
-    std::string kS38;
+    std::string kS38, kA6, kA7;
     for (size_t i = 0; i + 1 < parts.size(); i += 2) {
         if (parts[i] == "kS38") kS38 = parts[i + 1];
+        else if (parts[i] == "kA6") kA6 = parts[i + 1];
+        else if (parts[i] == "kA7") kA7 = parts[i + 1];
     }
-    if (kS38.empty()) return out;
+    auto* settings = editor->m_levelSettings;
+    if (!settings) return;
 
-    int row = 0;
-    for (auto& entry : splitStr(kS38, '|')) {
-        if (entry.empty()) continue;
-        auto f = splitStr(entry, '_');
-        std::map<int, std::string> m;
-        for (size_t i = 0; i + 1 < f.size(); i += 2) m[toInt(f[i], -1)] = f[i + 1];
-
-        int ch = toInt(getOr(m, 6, "0"));
-        if (ch <= 0) continue;
-        if (ch == 1005 || ch == 1006 || ch == 1010 || ch == 1011) continue;
-
-        int newCh = rm.chan(ch);
-        std::string s = "1,899,2,0,3," + std::to_string(15 + row * 30);
-        s += ",10,0";
-        s += ",23," + std::to_string(newCh);
-
-        int copyId = toInt(getOr(m, 9, "0"));
-        if (copyId > 0) {
-            s += ",50," + std::to_string(rm.chan(copyId));
-            s += ",49," + getOr(m, 10, "0a1a1a0a0");
-            if (toInt(getOr(m, 17, "0")) == 1) s += ",60,1";
-        } else {
-            s += ",7," + getOr(m, 1, "255");
-            s += ",8," + getOr(m, 2, "255");
-            s += ",9," + getOr(m, 3, "255");
-        }
-        int pc = toInt(getOr(m, 4, "-1"));
-        if (pc == 1) s += ",15,1";
-        else if (pc == 2) s += ",16,1";
-
-        s += ",17," + getOr(m, 5, "0");
-        s += ",35," + getOr(m, 7, "1");
-
-        out.push_back(s);
-        row++;
+    if (colors && !kS38.empty() && settings->m_effectManager) {
+        settings->m_effectManager->setupFromString(kS38);
     }
-    return out;
+    if (bg) {
+        if (!kA6.empty()) settings->m_backgroundIndex = toInt(kA6, 1);
+        if (!kA7.empty()) settings->m_groundIndex = toInt(kA7, 1);
+    }
 }
 
 // ---------------------------------------------------------------
@@ -276,8 +223,9 @@ public:
             this->unscheduleUpdate();
             if (m_notif) m_notif->hide();
             Notification::create(
-                "Pronto! " + std::to_string(m_totalObjects) + " objetos colados. Salve a fase.",
-                NotificationIcon::Success, 4.f
+                "Pronto! " + std::to_string(m_totalObjects) +
+                " objetos. Salve, saia e abra a fase de novo.",
+                NotificationIcon::Success, 5.f
             )->show();
             this->removeFromParentAndCleanup(true);
             return;
@@ -350,9 +298,9 @@ static void startImport(Ref<LevelEditorLayer> editor, int levelID) {
             }
 
             auto mod = Mod::get();
-            bool spikes = mod->getSettingValue<bool>("spikes-visual");
             bool trig = mod->getSettingValue<bool>("copy-triggers");
             bool colors = mod->getSettingValue<bool>("copy-colors");
+            bool bg = mod->getSettingValue<bool>("copy-bg");
             size_t maxObjs = static_cast<size_t>(mod->getSettingValue<int64_t>("max-objects"));
             size_t chunkSize = static_cast<size_t>(
                 std::max<int64_t>(20, mod->getSettingValue<int64_t>("chunk-size"))
@@ -360,7 +308,6 @@ static void startImport(Ref<LevelEditorLayer> editor, int levelID) {
 
             Remapper rm;
             rm.nextGroup = static_cast<int>(mod->getSettingValue<int64_t>("group-base"));
-            rm.nextChan = static_cast<int>(mod->getSettingValue<int64_t>("channel-base"));
 
             auto segs = splitStr(decoded, ';');
             std::string header = segs.empty() ? "" : segs[0];
@@ -369,18 +316,16 @@ static void startImport(Ref<LevelEditorLayer> editor, int levelID) {
             for (size_t i = 1; i < segs.size(); ++i) {
                 if (segs[i].empty()) continue;
                 std::string o;
-                if (convertObject(segs[i], rm, spikes, trig, o)) {
+                if (convertObject(segs[i], rm, trig, o)) {
                     good.push_back(std::move(o));
                     if (good.size() >= maxObjs) break;
                 }
             }
 
-            if (colors) {
-                for (auto& t : buildColorTriggers(header, rm)) good.push_back(t);
-            }
+            applyHeader(editor, header, colors, bg);
 
             if (good.empty()) {
-                showError("Nada para copiar dessa fase");
+                showError("Nenhum objeto copiavel (cores aplicadas)");
                 return;
             }
 
