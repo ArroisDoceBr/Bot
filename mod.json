@@ -6,54 +6,40 @@
     "mac": "2.2081",
     "ios": "2.2081"
   },
-  "version": "v1.0.0",
+  "version": "v1.1.0",
   "id": "arroisdocebr.decorcopy",
   "name": "Decor Copy",
   "developer": "ArroisDoceBr",
-  "description": "Copia decoracao, efeitos e cores de outra fase no editor.",
+  "description": "Copia decoracao, efeitos, cores e fundo de outra fase no editor.",
   "settings": {
     "level-id": {
       "type": "int",
       "name": "ID da fase (plano B)",
-      "description": "Usado se a caixa de texto do popup nao funcionar.",
+      "description": "Usado se a caixa de texto do popup ficar vazia.",
       "default": 0,
       "min": 0
     },
     "group-base": {
       "type": "int",
       "name": "Grupo inicial",
-      "description": "Os grupos copiados comecam neste numero.",
       "default": 4000,
       "min": 1,
       "max": 9000
-    },
-    "channel-base": {
-      "type": "int",
-      "name": "Canal de cor inicial",
-      "description": "Os canais de cor 1-999 copiados comecam aqui.",
-      "default": 500,
-      "min": 1,
-      "max": 900
     },
     "chunk-size": {
       "type": "int",
       "name": "Objetos por parte",
       "description": "Menor = mais lento, mas trava menos.",
-      "default": 250,
+      "default": 200,
       "min": 20,
       "max": 2000
     },
     "max-objects": {
       "type": "int",
       "name": "Maximo de objetos",
-      "default": 40000,
+      "default": 60000,
       "min": 100,
       "max": 500000
-    },
-    "spikes-visual": {
-      "type": "bool",
-      "name": "Copiar spikes/serras sem hitbox",
-      "default": true
     },
     "copy-triggers": {
       "type": "bool",
@@ -63,6 +49,11 @@
     "copy-colors": {
       "type": "bool",
       "name": "Copiar cores do tema",
+      "default": true
+    },
+    "copy-bg": {
+      "type": "bool",
+      "name": "Copiar fundo e chao",
       "default": true
     }
   }
