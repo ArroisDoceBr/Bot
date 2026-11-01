@@ -8,6 +8,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <memory>
 #include <cmath>
 #include <cstdio>
@@ -56,6 +57,15 @@ static std::string numStr(float v) {
     return std::string(buf);
 }
 
+// gira (x,y) em graus no sentido horario (como o GD)
+static void rotCW(float x, float y, float deg, float& ox, float& oy) {
+    float r = deg * 3.14159265f / 180.f;
+    float c = std::cos(r);
+    float s = std::sin(r);
+    ox = x * c + y * s;
+    oy = -x * s + y * c;
+}
+
 // troca o valor de uma chave (ou adiciona se nao existir)
 static std::string setKey(std::string const& raw, int key, std::string const& val) {
     auto tok = splitStr(raw, ',');
@@ -82,18 +92,21 @@ static std::string setKey(std::string const& raw, int key, std::string const& va
     return out;
 }
 
-// fica so com o visual (cores etc.): tira id, posicao, rotacao, flip, grupos, hitbox, escala, camada
-static std::string stripSkin(std::string const& raw) {
+// tira posicao, rotacao, grupos e hitbox; sobra id, cores, camada
+static std::string stripPiece(std::string const& raw, bool keepFlips) {
     auto tok = splitStr(raw, ',');
     std::string out;
     for (size_t i = 0; i + 1 < tok.size(); i += 2) {
         int k = toInt(tok[i], -1);
         switch (k) {
-            case 1: case 2: case 3: case 4: case 5: case 6:
-            case 24: case 25: case 32: case 33: case 108: case 121:
+            case 2: case 3: case 6:
+            case 33: case 108: case 121:
             case 57: case 274: case 442:
             case 51: case 71: case 395:
                 continue;
+            case 4: case 5:
+                if (!keepFlips) continue;
+                break;
             default:
                 break;
         }
@@ -106,15 +119,22 @@ static std::string stripSkin(std::string const& raw) {
 }
 
 // ---------------------------------------------------------------
-// Listas de IDs
+// Classificacao de objetos: 1 = bloco, 2 = espinho/serra, 3 = decoracao
 // ---------------------------------------------------------------
-static bool isSpike(int id) {
-    static const std::set<int> a = {
-        8, 9, 39, 61, 103, 392,
-        363, 364, 365,
-        88, 89, 98, 397, 398, 399
-    };
-    return a.count(id) > 0;
+static int classify(int id) {
+    static std::unordered_map<int, int> cache;
+    auto it = cache.find(id);
+    if (it != cache.end()) return it->second;
+    int kind = 0;
+    auto* obj = GameObject::createWithKey(id);
+    if (obj) {
+        auto t = obj->m_objectType;
+        if (t == GameObjectType::Solid || t == GameObjectType::Slope) kind = 1;
+        else if (t == GameObjectType::Hazard) kind = 2;
+        else if (t == GameObjectType::Decoration) kind = 3;
+    }
+    cache[id] = kind;
+    return kind;
 }
 
 static bool isModePortal(int id) {
@@ -122,12 +142,11 @@ static bool isModePortal(int id) {
     return p.count(id) > 0;
 }
 
-// efeitos que dao pra copiar sem depender de grupos
 static bool isCopyableEffect(int id, int pulseMode, bool shake) {
-    if (id == 899) return true;                    // cor
-    if (id == 1006 && pulseMode == 0) return true; // pulse em canal de cor
-    if (id == 1818 || id == 1819) return true;     // efeito de fundo
-    if (id == 1520 && shake) return true;          // shake
+    if (id == 899) return true;
+    if (id == 1006 && pulseMode == 0) return true;
+    if (id == 1818 || id == 1819) return true;
+    if (id == 1520 && shake) return true;
     return false;
 }
 
@@ -139,14 +158,16 @@ static bool isTriggerLike(int id) {
 }
 
 // ---------------------------------------------------------------
-// Leitura de objeto da fase original
+// Objeto da fase original
 // ---------------------------------------------------------------
 struct SObj {
     int id = 0;
-    float x = 0.f, y = 0.f;
-    int pulseMode = 0;
+    float x = 0.f, y = 0.f, rot = 0.f;
+    bool flipY = false;
+    bool trig = false;
     bool touch = false;
     bool spawn = false;
+    int pulseMode = 0;
     std::string raw;
 };
 
@@ -160,7 +181,10 @@ static bool parseObj(std::string const& s, SObj& o) {
             case 1: o.id = toInt(v); break;
             case 2: o.x = toFloat(v); break;
             case 3: o.y = toFloat(v); break;
+            case 5: o.flipY = (toInt(v) == 1); break;
+            case 6: o.rot = toFloat(v); break;
             case 11: o.touch = (toInt(v) == 1); break;
+            case 36: o.trig = (toInt(v) == 1); break;
             case 52: o.pulseMode = toInt(v); break;
             case 62: o.spawn = (toInt(v) == 1); break;
             default: break;
@@ -171,23 +195,35 @@ static bool parseObj(std::string const& s, SObj& o) {
     return true;
 }
 
-static std::string bestOf(std::map<std::string, int> const& m) {
-    std::string best;
-    int bc = 0;
-    for (auto& kv : m) {
-        if (kv.second > bc) {
-            bc = kv.second;
-            best = kv.first;
-        }
-    }
-    return best;
+// ---------------------------------------------------------------
+// Padroes
+// ---------------------------------------------------------------
+struct Piece {
+    std::string base;
+    float lx = 0.f, ly = 0.f, rr = 0.f;
+};
+
+struct Templ {
+    std::vector<Piece> pieces; // pieces[0] = o proprio objeto original
+    int decor = 0;
+};
+
+typedef std::map<std::string, std::pair<int, Templ>> PatMap;
+
+static std::vector<Templ> pickTop(PatMap const& m, size_t n) {
+    std::vector<std::pair<int, Templ const*>> v;
+    for (auto& kv : m) v.push_back({kv.second.first, &kv.second.second});
+    std::sort(v.begin(), v.end(), [](auto const& a, auto const& b) { return a.first > b.first; });
+    std::vector<Templ> out;
+    for (size_t i = 0; i < v.size() && out.size() < n; ++i) out.push_back(*v[i].second);
+    return out;
 }
 
 // ---------------------------------------------------------------
-// Mapeamento de tempo (x da original -> x da sua fase)
+// Mapa de tempo (x da original -> x da sua fase)
 // ---------------------------------------------------------------
 struct XMap {
-    std::vector<std::pair<float, float>> pts; // (x original, x seu), crescente
+    std::vector<std::pair<float, float>> pts;
 
     float map(float x) const {
         if (pts.empty()) return x;
@@ -204,7 +240,7 @@ struct XMap {
 };
 
 // ---------------------------------------------------------------
-// Aplica cores e fundo/chao na configuracao da fase
+// Cores e fundo/chao
 // ---------------------------------------------------------------
 static void applyHeader(
     LevelEditorLayer* editor, std::string const& header, bool colors, bool bg
@@ -288,23 +324,37 @@ static void showError(std::string const& msg) {
 
 static void processLevel(Ref<LevelEditorLayer> editor, std::string const& decoded) {
     auto mod = Mod::get();
+    bool themeOnly = mod->getSettingValue<bool>("theme-only");
     bool colors = mod->getSettingValue<bool>("copy-colors");
     bool bg = mod->getSettingValue<bool>("copy-bg");
-    bool skin = mod->getSettingValue<bool>("copy-spike-skin");
+    bool patSpikes = mod->getSettingValue<bool>("pattern-spikes");
+    bool patBlocks = mod->getSettingValue<bool>("pattern-blocks");
     bool effects = mod->getSettingValue<bool>("copy-effects");
     bool shake = mod->getSettingValue<bool>("copy-shake");
     bool align = mod->getSettingValue<bool>("align-portals");
-    bool delMine = mod->getSettingValue<bool>("delete-my-color-triggers");
     int zorder = static_cast<int>(mod->getSettingValue<int64_t>("overlay-zorder"));
+    float radius = static_cast<float>(mod->getSettingValue<int64_t>("radius"));
+    size_t maxPer = static_cast<size_t>(mod->getSettingValue<int64_t>("max-per-object"));
+    size_t nTempl = static_cast<size_t>(std::max<int64_t>(1, mod->getSettingValue<int64_t>("templates")));
     size_t maxObjs = static_cast<size_t>(mod->getSettingValue<int64_t>("max-objects"));
     size_t chunkSize = static_cast<size_t>(
         std::max<int64_t>(20, mod->getSettingValue<int64_t>("chunk-size"))
     );
 
-    // 1) le a fase original
     auto segs = splitStr(decoded, ';');
     std::string header = segs.empty() ? "" : segs[0];
 
+    // ---------- modo so tema ----------
+    if (themeOnly) {
+        applyHeader(editor, header, colors, bg);
+        Notification::create(
+            "Tema aplicado! Salve, saia e abra a fase de novo.",
+            NotificationIcon::Success, 5.f
+        )->show();
+        return;
+    }
+
+    // ---------- 1) le a fase original ----------
     std::vector<SObj> objs;
     objs.reserve(segs.size());
     for (size_t i = 1; i < segs.size(); ++i) {
@@ -317,25 +367,123 @@ static void processLevel(Ref<LevelEditorLayer> editor, std::string const& decode
         return;
     }
 
-    // 2) visual dos espinhos (o mais comum da fase original)
-    std::map<int, std::map<std::string, int>> byId;
-    std::map<std::string, int> allSkins;
+    // ---------- 2) grade de decoracao + lista de ancoras ----------
+    float cell = std::max(radius, 1.f);
+    auto cellKey = [&](int cx, int cy) -> long long {
+        return static_cast<long long>(cx) * 1000003LL + static_cast<long long>(cy);
+    };
+    std::unordered_map<long long, std::vector<int>> grid;
+    std::map<int, std::vector<int>> spikeById;
+    std::vector<int> blockList;
+
     std::vector<std::pair<float, int>> origPortals;
     float origEnd = 0.f;
 
-    for (auto const& o : objs) {
-        if (isSpike(o.id)) {
-            std::string sk = stripSkin(o.raw);
-            byId[o.id][sk]++;
-            allSkins[sk]++;
-        }
+    for (int i = 0; i < static_cast<int>(objs.size()); ++i) {
+        auto const& o = objs[i];
         if (isModePortal(o.id)) origPortals.push_back({o.x, o.id});
         if (!isTriggerLike(o.id)) origEnd = std::max(origEnd, o.x);
+        if (o.trig || isTriggerLike(o.id)) continue;
+        int kind = classify(o.id);
+        if (kind == 2) spikeById[o.id].push_back(i);
+        else if (kind == 1) blockList.push_back(i);
+        else if (kind == 3) {
+            int cx = static_cast<int>(std::floor(o.x / cell));
+            int cy = static_cast<int>(std::floor(o.y / cell));
+            grid[cellKey(cx, cy)].push_back(i);
+        }
     }
     std::sort(origPortals.begin(), origPortals.end());
-    std::string anySkin = bestOf(allSkins);
 
-    // 3) le a sua fase
+    // ---------- 3) monta e conta os padroes ----------
+    auto buildTempl = [&](int ai, std::string& sig) -> Templ {
+        Templ t;
+        auto const& a = objs[ai];
+        float ar = a.rot + (a.flipY ? 180.f : 0.f);
+
+        std::vector<std::pair<float, int>> near;
+        int cx = static_cast<int>(std::floor(a.x / cell));
+        int cy = static_cast<int>(std::floor(a.y / cell));
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                auto it = grid.find(cellKey(cx + dx, cy + dy));
+                if (it == grid.end()) continue;
+                for (int j : it->second) {
+                    float ddx = objs[j].x - a.x;
+                    float ddy = objs[j].y - a.y;
+                    float d2 = ddx * ddx + ddy * ddy;
+                    if (d2 <= radius * radius) near.push_back({d2, j});
+                }
+            }
+        }
+        std::sort(near.begin(), near.end());
+        if (near.size() > maxPer) near.resize(maxPer);
+
+        Piece self;
+        self.base = stripPiece(a.raw, false);
+        t.pieces.push_back(self);
+
+        std::vector<std::string> parts;
+        for (auto& pr : near) {
+            auto const& d = objs[pr.second];
+            Piece p;
+            p.base = stripPiece(d.raw, true);
+            float lx, ly;
+            rotCW(d.x - a.x, d.y - a.y, -ar, lx, ly);
+            p.lx = lx;
+            p.ly = ly;
+            p.rr = d.rot - ar;
+            parts.push_back(
+                p.base + "|" + std::to_string(static_cast<int>(std::lround(lx / 7.5f))) +
+                "|" + std::to_string(static_cast<int>(std::lround(ly / 7.5f))) +
+                "|" + std::to_string(static_cast<int>(std::lround(p.rr / 15.f)))
+            );
+            t.pieces.push_back(std::move(p));
+        }
+        t.decor = static_cast<int>(near.size());
+        std::sort(parts.begin(), parts.end());
+        sig = self.base + "#";
+        for (auto& s : parts) {
+            sig += s;
+            sig += "@";
+        }
+        return t;
+    };
+
+    auto addPattern = [&](PatMap& m, int ai) {
+        std::string sig;
+        Templ t = buildTempl(ai, sig);
+        if (t.decor < 1) return;
+        auto it = m.find(sig);
+        if (it == m.end()) m[sig] = {1, std::move(t)};
+        else it->second.first++;
+    };
+
+    std::map<int, std::vector<Templ>> spikeTempls;
+    std::vector<Templ> spikeAny, blockAny;
+
+    if (patSpikes) {
+        PatMap all;
+        for (auto& kv : spikeById) {
+            PatMap pm;
+            size_t step = std::max<size_t>(1, kv.second.size() / 1500);
+            for (size_t i = 0; i < kv.second.size(); i += step) {
+                addPattern(pm, kv.second[i]);
+                addPattern(all, kv.second[i]);
+            }
+            auto top = pickTop(pm, nTempl);
+            if (!top.empty()) spikeTempls[kv.first] = std::move(top);
+        }
+        spikeAny = pickTop(all, nTempl);
+    }
+    if (patBlocks && !blockList.empty()) {
+        PatMap pm;
+        size_t step = std::max<size_t>(1, blockList.size() / 3000);
+        for (size_t i = 0; i < blockList.size(); i += step) addPattern(pm, blockList[i]);
+        blockAny = pickTop(pm, nTempl);
+    }
+
+    // ---------- 4) le a sua fase ----------
     CCArray* arr = editor->m_objects;
     std::vector<GameObject*> mine;
     if (arr) {
@@ -351,13 +499,8 @@ static void processLevel(Ref<LevelEditorLayer> editor, std::string const& decode
 
     float userEnd = 0.f;
     std::vector<std::pair<float, int>> userPortals;
-    std::vector<GameObject*> myColorTriggers;
     for (auto* o : mine) {
         int id = o->m_objectID;
-        if (id == 899) {
-            myColorTriggers.push_back(o);
-            continue;
-        }
         if (!isTriggerLike(id)) userEnd = std::max(userEnd, o->getPositionX());
         if (isModePortal(id)) userPortals.push_back({o->getPositionX(), id});
     }
@@ -365,207 +508,69 @@ static void processLevel(Ref<LevelEditorLayer> editor, std::string const& decode
     if (userEnd <= 0.f) userEnd = 1.f;
     if (origEnd <= 0.f) origEnd = 1.f;
 
-    // 4) mapa de tempo
-    XMap xm;
-    xm.pts.push_back({0.f, 0.f});
-    if (align) {
-        size_t j = 0;
-        float lastO = 0.f, lastU = 0.f;
-        for (auto& up : userPortals) {
-            size_t k = j;
-            while (k < origPortals.size() && origPortals[k].second != up.second) ++k;
-            if (k >= origPortals.size()) continue;
-            float ox = origPortals[k].first;
-            float ux = up.first;
-            if (ox > lastO && ux > lastU) {
-                xm.pts.push_back({ox, ux});
-                lastO = ox;
-                lastU = ux;
-            }
-            j = k + 1;
-        }
-        if (origEnd > lastO && userEnd > lastU) xm.pts.push_back({origEnd, userEnd});
-    } else {
-        xm.pts.push_back({origEnd, userEnd});
-    }
-
-    // 5) monta o que sera colado
+    // ---------- 5) aplica os padroes nos seus objetos ----------
     std::vector<std::string> good;
+    std::map<int, size_t> counter;
+    int decorated = 0;
 
-    if (skin && !anySkin.empty()) {
-        for (auto* o : mine) {
-            int id = o->m_objectID;
-            if (!isSpike(id)) continue;
-            if (good.size() >= maxObjs) break;
-            std::string sk = anySkin;
-            auto it = byId.find(id);
-            if (it != byId.end()) sk = bestOf(it->second);
-            std::string s = setKey(sk, 1, std::to_string(id));
-            s += ",2," + numStr(o->getPositionX());
-            s += ",3," + numStr(o->getPositionY());
-            s += ",6," + numStr(o->getRotation());
-            s += ",25," + std::to_string(zorder);
+    auto emit = [&](Templ const& t, GameObject* o) {
+        float ux = o->getPositionX();
+        float uy = o->getPositionY();
+        float ur = o->getRotation();
+        for (size_t k = 0; k < t.pieces.size(); ++k) {
+            auto const& p = t.pieces[k];
+            float ox, oy;
+            rotCW(p.lx, p.ly, ur, ox, oy);
+            std::string s = p.base;
+            s += ",2," + numStr(ux + ox);
+            s += ",3," + numStr(uy + oy);
+            s += ",6," + numStr(ur + p.rr);
+            if (k == 0) s = setKey(s, 25, std::to_string(zorder));
             s += ",121,1";
             good.push_back(std::move(s));
         }
+        decorated++;
+    };
+
+    if (patSpikes || patBlocks) {
+        for (auto* o : mine) {
+            if (good.size() >= maxObjs) break;
+            int id = o->m_objectID;
+            if (isTriggerLike(id)) continue;
+            auto type = o->m_objectType;
+
+            if (patSpikes && type == GameObjectType::Hazard) {
+                std::vector<Templ>* list = &spikeAny;
+                auto it = spikeTempls.find(id);
+                if (it != spikeTempls.end()) list = &it->second;
+                if (list->empty()) continue;
+                emit((*list)[counter[id]++ % list->size()], o);
+            } else if (patBlocks && (type == GameObjectType::Solid || type == GameObjectType::Slope)) {
+                if (blockAny.empty()) continue;
+                emit(blockAny[counter[-1]++ % blockAny.size()], o);
+            }
+        }
     }
 
+    // ---------- 6) efeitos no tempo certo ----------
     int effCount = 0;
     if (effects) {
-        for (auto const& o : objs) {
-            if (!isCopyableEffect(o.id, o.pulseMode, shake)) continue;
-            if (o.touch || o.spawn) continue;
-            if (good.size() >= maxObjs) break;
-            float nx = xm.map(o.x);
-            if (nx > userEnd + 300.f) continue;
-            good.push_back(setKey(o.raw, 2, numStr(nx)));
-            effCount++;
-        }
-    }
-
-    // 6) apaga os seus triggers de cor (so se tem efeitos novos pra colocar no lugar)
-    if (effects && delMine && effCount > 0) {
-        for (auto* o : myColorTriggers) {
-            editor->removeObject(o, true);
-        }
-    }
-
-    applyHeader(editor, header, colors, bg);
-
-    if (good.empty()) {
-        Notification::create("Cores e fundo aplicados. Nada pra colar.",
-            NotificationIcon::Success, 4.f)->show();
-        return;
-    }
-
-    // 7) cola em partes
-    std::vector<std::string> chunks;
-    std::string cur;
-    size_t n = 0;
-    for (auto& o : good) {
-        cur += o;
-        cur += ';';
-        if (++n >= chunkSize) {
-            chunks.push_back(cur);
-            cur.clear();
-            n = 0;
-        }
-    }
-    if (!cur.empty()) chunks.push_back(cur);
-
-    auto notif = Notification::create("Colando 0/" + std::to_string(chunks.size()),
-        NotificationIcon::Loading, 0.f);
-    notif->show();
-
-    auto paster = DecorPaster::create(editor, std::move(chunks),
-        static_cast<int>(good.size()), notif);
-    if (!paster) {
-        notif->hide();
-        showError("Erro interno");
-        return;
-    }
-    editor->addChild(paster);
-    paster->scheduleUpdate();
-}
-
-static void startImport(Ref<LevelEditorLayer> editor, int levelID) {
-    if (levelID <= 0) {
-        showError("ID invalido");
-        return;
-    }
-    Notification::create("Baixando fase " + std::to_string(levelID) + "...",
-        NotificationIcon::Loading, 2.f)->show();
-
-    web::WebRequest req;
-    req.userAgent("");
-    req.header("Content-Type", "application/x-www-form-urlencoded");
-    req.bodyString("levelID=" + std::to_string(levelID) + "&secret=Wmfd2893gb7");
-
-    s_holder.spawn(
-        req.post("https://www.boomlings.com/database/downloadGJLevel22.php"),
-        [editor](web::WebResponse res) {
-            if (!editor->getParent()) return;
-            if (!res.ok()) {
-                showError("Falha no download (codigo " + std::to_string(res.code()) + ")");
-                return;
+        XMap xm;
+        xm.pts.push_back({0.f, 0.f});
+        if (align) {
+            size_t j = 0;
+            float lastO = 0.f, lastU = 0.f;
+            for (auto& up : userPortals) {
+                size_t k = j;
+                while (k < origPortals.size() && origPortals[k].second != up.second) ++k;
+                if (k >= origPortals.size()) continue;
+                float ox = origPortals[k].first;
+                float ux = up.first;
+                if (ox > lastO && ux > lastU) {
+                    xm.pts.push_back({ox, ux});
+                    lastO = ox;
+                    lastU = ux;
+                }
+                j = k + 1;
             }
-            std::string text = res.string().unwrapOr("");
-
-            auto hashPos = text.find('#');
-            if (hashPos != std::string::npos) text = text.substr(0, hashPos);
-
-            auto parts = splitStr(text, ':');
-            std::string raw;
-            for (size_t i = 0; i + 1 < parts.size(); i += 2) {
-                if (parts[i] == "4") raw = parts[i + 1];
-            }
-            if (raw.empty()) {
-                showError("Fase nao encontrada: " + text.substr(0, 40));
-                return;
-            }
-
-            std::string decoded;
-            if (raw.rfind("kS", 0) == 0) {
-                decoded = raw;
-            } else {
-                gd::string d = ZipUtils::decompressString(gd::string(raw), false, 11);
-                decoded = d.c_str();
-            }
-            if (decoded.empty()) {
-                showError("Nao consegui ler os dados da fase");
-                return;
-            }
-
-            processLevel(editor, decoded);
-        }
-    );
-}
-
-// ---------------------------------------------------------------
-// Botao no menu de pausa do editor
-// ---------------------------------------------------------------
-class $modify(DecorPauseLayer, EditorPauseLayer) {
-    bool init(LevelEditorLayer* editor) {
-        if (!EditorPauseLayer::init(editor)) return false;
-
-        auto win = CCDirector::get()->getWinSize();
-        auto menu = CCMenu::create();
-        auto spr = ButtonSprite::create("Copiar decor");
-        spr->setScale(0.7f);
-        auto btn = CCMenuItemSpriteExtra::create(
-            spr, this, menu_selector(DecorPauseLayer::onCopyDecor)
-        );
-        menu->addChild(btn);
-        btn->setPosition({0.f, 0.f});
-        menu->setPosition({win.width - 65.f, win.height - 25.f});
-        this->addChild(menu, 100);
-        return true;
-    }
-
-    void onCopyDecor(CCObject*) {
-        auto holder = std::make_shared<TextInput*>(nullptr);
-
-        auto alert = createQuickPopup(
-            "Copiar tema",
-            "Digite o ID da fase:\n\n\n",
-            "Cancelar", "Copiar",
-            [editor = Ref<LevelEditorLayer>(m_editorLayer), holder](FLAlertLayer*, bool btn2) {
-                if (!btn2) return;
-                int id = 0;
-                if (*holder) id = toInt((*holder)->getString());
-                if (id <= 0) id = static_cast<int>(Mod::get()->getSettingValue<int64_t>("level-id"));
-                startImport(editor, id);
-            },
-            false
-        );
-
-        auto win = CCDirector::get()->getWinSize();
-        auto input = TextInput::create(160.f, "ID da fase", "bigFont.fnt");
-        input->setFilter("0123456789");
-        input->setMaxCharCount(10);
-        input->setPosition({win.width / 2.f, win.height / 2.f - 8.f});
-        alert->m_mainLayer->addChild(input);
-        *holder = input;
-        alert->show();
-    }
-};
+            if (origEnd > lastO && userEnd > lastU) xm.pts.push_back({origEnd, us
