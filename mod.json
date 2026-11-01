@@ -6,30 +6,44 @@
     "mac": "2.2081",
     "ios": "2.2081"
   },
-  "version": "v1.1.0",
+  "version": "v1.2.0",
   "id": "arroisdocebr.decorcopy",
   "name": "Decor Copy",
   "developer": "ArroisDoceBr",
-  "description": "Copia decoracao, efeitos, cores e fundo de outra fase no editor.",
+  "description": "Aprende o estilo de outra fase e aplica nos espinhos da sua.",
   "settings": {
     "level-id": {
       "type": "int",
       "name": "ID da fase (plano B)",
-      "description": "Usado se a caixa de texto do popup ficar vazia.",
       "default": 0,
       "min": 0
     },
-    "group-base": {
+    "radius": {
       "type": "int",
-      "name": "Grupo inicial",
-      "default": 4000,
+      "name": "Raio da decoracao",
+      "description": "Distancia em unidades do espinho. 30 = 1 bloco.",
+      "default": 45,
+      "min": 15,
+      "max": 150
+    },
+    "max-per-spike": {
+      "type": "int",
+      "name": "Max. objetos por espinho",
+      "default": 50,
+      "min": 3,
+      "max": 300
+    },
+    "templates": {
+      "type": "int",
+      "name": "Variacoes de estilo",
+      "description": "Quantos modelos de espinho da fase original usar.",
+      "default": 4,
       "min": 1,
-      "max": 9000
+      "max": 10
     },
     "chunk-size": {
       "type": "int",
       "name": "Objetos por parte",
-      "description": "Menor = mais lento, mas trava menos.",
       "default": 200,
       "min": 20,
       "max": 2000
@@ -37,13 +51,13 @@
     "max-objects": {
       "type": "int",
       "name": "Maximo de objetos",
-      "default": 60000,
+      "default": 40000,
       "min": 100,
       "max": 500000
     },
     "copy-triggers": {
       "type": "bool",
-      "name": "Copiar triggers de efeito",
+      "name": "Copiar efeitos (pulse, shake, cor)",
       "default": true
     },
     "copy-colors": {
