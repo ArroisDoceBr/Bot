@@ -8,7 +8,10 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <memory>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <algorithm>
 
@@ -40,131 +43,152 @@ static int toInt(std::string const& s, int def = 0) {
     return static_cast<int>(v);
 }
 
-// ---------------------------------------------------------------
-// Renumeracao de grupos
-// ---------------------------------------------------------------
-struct Remapper {
-    std::map<int, int> groups;
-    int nextGroup = 4000;
+static float toFloat(std::string const& s, float def = 0.f) {
+    if (s.empty()) return def;
+    char* end = nullptr;
+    double v = std::strtod(s.c_str(), &end);
+    if (end == s.c_str()) return def;
+    return static_cast<float>(v);
+}
 
-    int group(int g) {
-        if (g <= 0) return g;
-        auto it = groups.find(g);
-        if (it != groups.end()) return it->second;
-        if (nextGroup > 9999) return g;
-        int n = nextGroup++;
-        groups[g] = n;
-        return n;
-    }
-};
+static std::string fmt(float v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.2f", v);
+    return std::string(buf);
+}
 
-static std::string mapGroupList(std::string const& v, Remapper& rm) {
-    if (v.empty()) return v;
-    auto p = splitStr(v, '.');
-    std::string out;
-    for (size_t i = 0; i < p.size(); ++i) {
-        if (i) out += '.';
-        out += std::to_string(rm.group(toInt(p[i])));
-    }
-    return out;
+// gira o vetor (x,y) em graus no sentido horario (como o GD)
+static void rotCW(float x, float y, float deg, float& ox, float& oy) {
+    float r = deg * 3.14159265f / 180.f;
+    float c = std::cos(r);
+    float s = std::sin(r);
+    ox = x * c + y * s;
+    oy = -x * s + y * c;
 }
 
 // ---------------------------------------------------------------
 // Listas de IDs
 // ---------------------------------------------------------------
 
-// Objetos que mudam o gameplay: NAO copiar
+// Espinhos e serras: sao as "ancoras" do estilo
+static bool isAnchor(int id) {
+    static const std::set<int> a = {
+        8, 9, 39, 61, 103, 392,        // espinhos
+        363, 364, 365,                 // espinhos de planta
+        88, 89, 98, 397, 398, 399      // serras
+    };
+    return a.count(id) > 0;
+}
+
+// Objetos que mudam o gameplay: nunca copiar como decoracao
 static bool isBlocked(int id) {
     static const std::set<int> blocked = {
-        31,                                   // start pos
-        10, 11,                               // portais de gravidade
-        12, 13, 47, 111, 660, 745, 1331, 1933,// portais de modo
-        45, 46,                               // espelho
-        99, 101,                              // tamanho
-        286, 287,                             // dual
-        200, 201, 202, 203, 1334,             // velocidade
-        747,                                  // teleporte
-        36, 84, 141, 1022, 1330, 1333,        // orbs
-        1704, 1751,                           // orbs dash
-        35, 67, 140, 1332,                    // pads
-        142, 1329,                            // moedas
-        2063,                                 // checkpoint
-        3600,                                 // end trigger
-        1917, 1932, 1934, 1935, 2066,         // reverse, player control, song, time warp, gravity
-        1595, 1611, 1811, 1815, 1816, 1817,   // touch, count, colisao, pickup
-        3614, 3615, 3617, 3619, 3620, 3641    // tempo e item edit
+        31,
+        10, 11,
+        12, 13, 47, 111, 660, 745, 1331, 1933,
+        45, 46,
+        99, 101,
+        286, 287,
+        200, 201, 202, 203, 1334,
+        747,
+        36, 84, 141, 1022, 1330, 1333,
+        1704, 1751,
+        35, 67, 140, 1332,
+        142, 1329,
+        2063,
+        3600,
+        1917, 1932, 1934, 1935, 2066,
+        1595, 1611, 1811, 1815, 1816, 1817,
+        3614, 3615, 3617, 3619, 3620, 3641
     };
     return blocked.count(id) > 0;
 }
 
-// Triggers de efeito conhecidos (nao recebem "sem hitbox")
-static bool isEffectTrigger(int id) {
-    static const std::set<int> trig = {
-        899, 901, 1006, 1007, 1049, 1268, 1346, 1347, 1520,
-        1585, 2067, 1818, 1819, 1616, 3016
-    };
-    return trig.count(id) > 0;
+// Triggers globais que vale copiar (nao dependem de grupos)
+static bool isGlobalEffect(int id, int pulseMode) {
+    if (id == 899) return true;                    // cor
+    if (id == 1006 && pulseMode == 0) return true; // pulse em canal de cor
+    if (id == 1520) return true;                   // shake
+    if (id == 1818 || id == 1819) return true;     // efeito de fundo
+    return false;
 }
 
 // ---------------------------------------------------------------
-// Converte 1 objeto da string da fase
+// Objeto lido da fase original
 // ---------------------------------------------------------------
-static bool convertObject(
-    std::string const& obj, Remapper& rm, bool trig, std::string& out
-) {
-    auto tok = splitStr(obj, ',');
-    if (tok.size() < 4) return false;
-
-    std::vector<std::pair<int, std::string>> kv;
+struct SObj {
     int id = 0;
+    float x = 0.f, y = 0.f, rot = 0.f;
+    bool flipY = false;
+    bool trig = false;
+    int pulseMode = 0;
+    std::string raw;
+};
+
+static bool parseObj(std::string const& s, SObj& o) {
+    auto tok = splitStr(s, ',');
+    if (tok.size() < 4) return false;
     for (size_t i = 0; i + 1 < tok.size(); i += 2) {
         int k = toInt(tok[i], -1);
-        kv.push_back({k, tok[i + 1]});
-        if (k == 1) id = toInt(tok[i + 1]);
+        auto const& v = tok[i + 1];
+        switch (k) {
+            case 1: o.id = toInt(v); break;
+            case 2: o.x = toFloat(v); break;
+            case 3: o.y = toFloat(v); break;
+            case 5: o.flipY = (toInt(v) == 1); break;
+            case 6: o.rot = toFloat(v); break;
+            case 36: o.trig = (toInt(v) == 1); break;
+            case 52: o.pulseMode = toInt(v); break;
+            default: break;
+        }
     }
-    if (id <= 0) return false;
-    if (isBlocked(id)) return false;
+    if (o.id <= 0) return false;
+    o.raw = s;
+    return true;
+}
 
-    bool isTrig = isEffectTrigger(id);
-    if (isTrig && !trig) return false;
+static float effRot(SObj const& o) {
+    return o.rot + (o.flipY ? 180.f : 0.f);
+}
 
-    int pulseMode = 0;
-    bool hasNoTouch = false;
-    for (auto& p : kv) {
-        if (p.first == 52) pulseMode = toInt(p.second);
-        if (p.first == 121) hasNoTouch = true;
-    }
-
-    out.clear();
-    for (auto& p : kv) {
-        std::string v = p.second;
-        switch (p.first) {
-            case 57:
-            case 274:
-            case 442:
-                v = mapGroupList(v, rm);
-                break;
-            case 51:
-                // pulse em canal de cor (modo 0) nao muda; o resto e grupo
-                if (id == 1006 && pulseMode == 0) break;
-                v = std::to_string(rm.group(toInt(v)));
-                break;
-            case 71:
-            case 395:
-                v = std::to_string(rm.group(toInt(v)));
+// Remove posicao, rotacao, grupos e hitbox; sobra o visual (cores, camada, etc.)
+static std::string stripBase(std::string const& raw, bool dropFlips) {
+    auto tok = splitStr(raw, ',');
+    std::string out;
+    for (size_t i = 0; i + 1 < tok.size(); i += 2) {
+        int k = toInt(tok[i], -1);
+        switch (k) {
+            case 2: case 3: case 6:
+            case 57: case 274: case 442:
+            case 51: case 71: case 395:
+            case 33: case 108: case 121:
+                continue;
+            case 4: case 5:
+                if (dropFlips) continue;
                 break;
             default:
                 break;
         }
         if (!out.empty()) out += ',';
-        out += std::to_string(p.first);
+        out += tok[i];
         out += ',';
-        out += v;
+        out += tok[i + 1];
     }
-    // sem hitbox em tudo que nao e trigger de efeito
-    if (!isTrig && !hasNoTouch) out += ",121,1";
-    return true;
+    return out;
 }
+
+// ---------------------------------------------------------------
+// Modelos de estilo
+// ---------------------------------------------------------------
+struct Piece {
+    std::string base;
+    float lx = 0.f, ly = 0.f, rr = 0.f;
+};
+
+struct Templ {
+    std::vector<Piece> pieces;
+    int count = 0;
+};
 
 // ---------------------------------------------------------------
 // Aplica cores e fundo/chao na configuracao da fase
@@ -249,6 +273,218 @@ static void showError(std::string const& msg) {
     Notification::create(msg, NotificationIcon::Error, 5.f)->show();
 }
 
+static void processLevel(Ref<LevelEditorLayer> editor, std::string const& decoded) {
+    auto mod = Mod::get();
+    bool trig = mod->getSettingValue<bool>("copy-triggers");
+    bool colors = mod->getSettingValue<bool>("copy-colors");
+    bool bg = mod->getSettingValue<bool>("copy-bg");
+    size_t maxObjs = static_cast<size_t>(mod->getSettingValue<int64_t>("max-objects"));
+    size_t chunkSize = static_cast<size_t>(
+        std::max<int64_t>(20, mod->getSettingValue<int64_t>("chunk-size"))
+    );
+    float radius = static_cast<float>(mod->getSettingValue<int64_t>("radius"));
+    size_t maxPer = static_cast<size_t>(mod->getSettingValue<int64_t>("max-per-spike"));
+    size_t nTempl = static_cast<size_t>(std::max<int64_t>(1, mod->getSettingValue<int64_t>("templates")));
+
+    // 1) le a fase original
+    auto segs = splitStr(decoded, ';');
+    std::string header = segs.empty() ? "" : segs[0];
+
+    std::vector<SObj> objs;
+    objs.reserve(segs.size());
+    for (size_t i = 1; i < segs.size(); ++i) {
+        if (segs[i].empty()) continue;
+        SObj o;
+        if (parseObj(segs[i], o)) objs.push_back(std::move(o));
+    }
+
+    // 2) separa ancoras e decoracao (grade espacial)
+    float cell = std::max(radius, 1.f);
+    auto cellKey = [&](int cx, int cy) -> long long {
+        return static_cast<long long>(cx) * 1000003LL + static_cast<long long>(cy);
+    };
+    std::unordered_map<long long, std::vector<int>> grid;
+    std::map<int, std::vector<int>> anchorsById;
+
+    for (int i = 0; i < static_cast<int>(objs.size()); ++i) {
+        auto const& o = objs[i];
+        if (isAnchor(o.id)) {
+            anchorsById[o.id].push_back(i);
+            continue;
+        }
+        if (o.trig || isBlocked(o.id)) continue;
+        int cx = static_cast<int>(std::floor(o.x / cell));
+        int cy = static_cast<int>(std::floor(o.y / cell));
+        grid[cellKey(cx, cy)].push_back(i);
+    }
+
+    if (anchorsById.empty()) {
+        showError("A fase original nao tem espinhos/serras conhecidos");
+        return;
+    }
+
+    // 3) monta modelos
+    auto buildTempl = [&](int ai, size_t cap) -> Templ {
+        Templ t;
+        auto const& a = objs[ai];
+        float ar = effRot(a);
+
+        std::vector<std::pair<float, int>> near;
+        int cx = static_cast<int>(std::floor(a.x / cell));
+        int cy = static_cast<int>(std::floor(a.y / cell));
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                auto it = grid.find(cellKey(cx + dx, cy + dy));
+                if (it == grid.end()) continue;
+                for (int j : it->second) {
+                    float ddx = objs[j].x - a.x;
+                    float ddy = objs[j].y - a.y;
+                    float d2 = ddx * ddx + ddy * ddy;
+                    if (d2 <= radius * radius) near.push_back({d2, j});
+                }
+            }
+        }
+        t.count = static_cast<int>(near.size());
+        std::sort(near.begin(), near.end());
+        if (near.size() > cap) near.resize(cap);
+
+        // o proprio espinho da fase original (visual, por cima do seu)
+        Piece self;
+        self.base = stripBase(a.raw, true);
+        t.pieces.push_back(std::move(self));
+
+        for (auto& pr : near) {
+            auto const& d = objs[pr.second];
+            Piece p;
+            p.base = stripBase(d.raw, false);
+            float lx, ly;
+            rotCW(d.x - a.x, d.y - a.y, -ar, lx, ly);
+            p.lx = lx;
+            p.ly = ly;
+            p.rr = d.rot - ar;
+            t.pieces.push_back(std::move(p));
+        }
+        return t;
+    };
+
+    std::map<int, std::vector<Templ>> templs;
+    std::vector<Templ> anyTempls;
+
+    for (auto& kv : anchorsById) {
+        auto& list = kv.second;
+        size_t step = std::max<size_t>(1, list.size() / 300);
+        std::vector<Templ> valid, loose;
+        for (size_t i = 0; i < list.size(); i += step) {
+            Templ t = buildTempl(list[i], maxPer);
+            if (t.count >= 3 && t.count <= static_cast<int>(maxPer)) valid.push_back(std::move(t));
+            else if (t.count >= 1) loose.push_back(std::move(t));
+        }
+        auto& src = valid.empty() ? loose : valid;
+        std::vector<Templ> chosen;
+        if (!src.empty()) {
+            size_t take = std::min(nTempl, src.size());
+            for (size_t k = 0; k < take; ++k) {
+                size_t idx = (take == 1) ? 0 : (k * (src.size() - 1)) / (take - 1);
+                chosen.push_back(src[idx]);
+            }
+        }
+        if (!chosen.empty()) {
+            if (anyTempls.empty()) anyTempls = chosen;
+            templs[kv.first] = std::move(chosen);
+        }
+    }
+
+    if (anyTempls.empty()) {
+        showError("Nao achei decoracao perto dos espinhos da fase original");
+        return;
+    }
+
+    // 4) aplica nos espinhos da sua fase
+    std::vector<std::string> good;
+    float userMaxX = 0.f;
+    int userAnchors = 0;
+    std::map<int, size_t> counter;
+
+    CCArrayExt<GameObject*> mine(editor->m_objects);
+    for (auto* o : mine) {
+        if (!o) continue;
+        userMaxX = std::max(userMaxX, o->getPositionX());
+    }
+    for (auto* o : mine) {
+        if (!o) continue;
+        int id = o->m_objectID;
+        if (!isAnchor(id)) continue;
+        if (good.size() >= maxObjs) break;
+
+        std::vector<Templ>* list = &anyTempls;
+        auto it = templs.find(id);
+        if (it != templs.end()) list = &it->second;
+
+        Templ& t = (*list)[counter[id]++ % list->size()];
+        float ux = o->getPositionX();
+        float uy = o->getPositionY();
+        float ur = o->getRotation();
+        userAnchors++;
+
+        for (auto& p : t.pieces) {
+            float ox, oy;
+            rotCW(p.lx, p.ly, ur, ox, oy);
+            std::string s = p.base;
+            s += ",2," + fmt(ux + ox);
+            s += ",3," + fmt(uy + oy);
+            s += ",6," + fmt(ur + p.rr);
+            s += ",121,1";
+            good.push_back(std::move(s));
+        }
+    }
+
+    if (userAnchors == 0) {
+        showError("Nao achei espinhos/serras na sua fase");
+        return;
+    }
+
+    // 5) efeitos globais, so ate perto do fim da sua fase
+    if (trig) {
+        for (auto const& o : objs) {
+            if (!o.trig) continue;
+            if (!isGlobalEffect(o.id, o.pulseMode)) continue;
+            if (o.x > userMaxX + 300.f) continue;
+            good.push_back(o.raw);
+        }
+    }
+
+    applyHeader(editor, header, colors, bg);
+
+    // 6) cola em partes
+    std::vector<std::string> chunks;
+    std::string cur;
+    size_t n = 0;
+    for (auto& o : good) {
+        cur += o;
+        cur += ';';
+        if (++n >= chunkSize) {
+            chunks.push_back(cur);
+            cur.clear();
+            n = 0;
+        }
+    }
+    if (!cur.empty()) chunks.push_back(cur);
+
+    auto notif = Notification::create("Colando 0/" + std::to_string(chunks.size()),
+        NotificationIcon::Loading, 0.f);
+    notif->show();
+
+    auto paster = DecorPaster::create(editor, std::move(chunks),
+        static_cast<int>(good.size()), notif);
+    if (!paster) {
+        notif->hide();
+        showError("Erro interno");
+        return;
+    }
+    editor->addChild(paster);
+    paster->scheduleUpdate();
+}
+
 static void startImport(Ref<LevelEditorLayer> editor, int levelID) {
     if (levelID <= 0) {
         showError("ID invalido");
@@ -297,65 +533,7 @@ static void startImport(Ref<LevelEditorLayer> editor, int levelID) {
                 return;
             }
 
-            auto mod = Mod::get();
-            bool trig = mod->getSettingValue<bool>("copy-triggers");
-            bool colors = mod->getSettingValue<bool>("copy-colors");
-            bool bg = mod->getSettingValue<bool>("copy-bg");
-            size_t maxObjs = static_cast<size_t>(mod->getSettingValue<int64_t>("max-objects"));
-            size_t chunkSize = static_cast<size_t>(
-                std::max<int64_t>(20, mod->getSettingValue<int64_t>("chunk-size"))
-            );
-
-            Remapper rm;
-            rm.nextGroup = static_cast<int>(mod->getSettingValue<int64_t>("group-base"));
-
-            auto segs = splitStr(decoded, ';');
-            std::string header = segs.empty() ? "" : segs[0];
-
-            std::vector<std::string> good;
-            for (size_t i = 1; i < segs.size(); ++i) {
-                if (segs[i].empty()) continue;
-                std::string o;
-                if (convertObject(segs[i], rm, trig, o)) {
-                    good.push_back(std::move(o));
-                    if (good.size() >= maxObjs) break;
-                }
-            }
-
-            applyHeader(editor, header, colors, bg);
-
-            if (good.empty()) {
-                showError("Nenhum objeto copiavel (cores aplicadas)");
-                return;
-            }
-
-            std::vector<std::string> chunks;
-            std::string cur;
-            size_t n = 0;
-            for (auto& o : good) {
-                cur += o;
-                cur += ';';
-                if (++n >= chunkSize) {
-                    chunks.push_back(cur);
-                    cur.clear();
-                    n = 0;
-                }
-            }
-            if (!cur.empty()) chunks.push_back(cur);
-
-            auto notif = Notification::create("Colando 0/" + std::to_string(chunks.size()),
-                NotificationIcon::Loading, 0.f);
-            notif->show();
-
-            auto paster = DecorPaster::create(editor, std::move(chunks),
-                static_cast<int>(good.size()), notif);
-            if (!paster) {
-                notif->hide();
-                showError("Erro interno");
-                return;
-            }
-            editor->addChild(paster);
-            paster->scheduleUpdate();
+            processLevel(editor, decoded);
         }
     );
 }
