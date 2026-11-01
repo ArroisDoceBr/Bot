@@ -573,4 +573,162 @@ static void processLevel(Ref<LevelEditorLayer> editor, std::string const& decode
                 }
                 j = k + 1;
             }
-            if (origEnd > lastO && userEnd > lastU) xm.pts.push_back({origEnd, us
+            if (origEnd > lastO && userEnd > lastU) xm.pts.push_back({origEnd, userEnd});
+        } else {
+            xm.pts.push_back({origEnd, userEnd});
+        }
+
+        for (auto const& o : objs) {
+            if (!isCopyableEffect(o.id, o.pulseMode, shake)) continue;
+            if (o.touch || o.spawn) continue;
+            if (good.size() >= maxObjs) break;
+            float nx = xm.map(o.x);
+            if (nx > userEnd + 300.f) continue;
+            good.push_back(setKey(o.raw, 2, numStr(nx)));
+            effCount++;
+        }
+    }
+
+    applyHeader(editor, header, colors, bg);
+
+    if ((patSpikes || patBlocks) && decorated == 0 && effCount == 0) {
+        showError("Nao achei padroes ou objetos para decorar. Cores e fundo aplicados.");
+        return;
+    }
+    if (good.empty()) {
+        Notification::create("Cores e fundo aplicados. Nada pra colar.",
+            NotificationIcon::Success, 4.f)->show();
+        return;
+    }
+
+    // ---------- 7) cola em partes ----------
+    std::vector<std::string> chunks;
+    std::string cur;
+    size_t n = 0;
+    for (auto& o : good) {
+        cur += o;
+        cur += ';';
+        if (++n >= chunkSize) {
+            chunks.push_back(cur);
+            cur.clear();
+            n = 0;
+        }
+    }
+    if (!cur.empty()) chunks.push_back(cur);
+
+    auto notif = Notification::create("Colando 0/" + std::to_string(chunks.size()),
+        NotificationIcon::Loading, 0.f);
+    notif->show();
+
+    auto paster = DecorPaster::create(editor, std::move(chunks),
+        static_cast<int>(good.size()), notif);
+    if (!paster) {
+        notif->hide();
+        showError("Erro interno");
+        return;
+    }
+    editor->addChild(paster);
+    paster->scheduleUpdate();
+}
+
+static void startImport(Ref<LevelEditorLayer> editor, int levelID) {
+    if (levelID <= 0) {
+        showError("ID invalido");
+        return;
+    }
+    Notification::create("Baixando fase " + std::to_string(levelID) + "...",
+        NotificationIcon::Loading, 2.f)->show();
+
+    web::WebRequest req;
+    req.userAgent("");
+    req.header("Content-Type", "application/x-www-form-urlencoded");
+    req.bodyString("levelID=" + std::to_string(levelID) + "&secret=Wmfd2893gb7");
+
+    s_holder.spawn(
+        req.post("https://www.boomlings.com/database/downloadGJLevel22.php"),
+        [editor](web::WebResponse res) {
+            if (!editor->getParent()) return;
+            if (!res.ok()) {
+                showError("Falha no download (codigo " + std::to_string(res.code()) + ")");
+                return;
+            }
+            std::string text = res.string().unwrapOr("");
+
+            auto hashPos = text.find('#');
+            if (hashPos != std::string::npos) text = text.substr(0, hashPos);
+
+            auto parts = splitStr(text, ':');
+            std::string raw;
+            for (size_t i = 0; i + 1 < parts.size(); i += 2) {
+                if (parts[i] == "4") raw = parts[i + 1];
+            }
+            if (raw.empty()) {
+                showError("Fase nao encontrada: " + text.substr(0, 40));
+                return;
+            }
+
+            std::string decoded;
+            if (raw.rfind("kS", 0) == 0) {
+                decoded = raw;
+            } else {
+                gd::string d = ZipUtils::decompressString(gd::string(raw), false, 11);
+                decoded = d.c_str();
+            }
+            if (decoded.empty()) {
+                showError("Nao consegui ler os dados da fase");
+                return;
+            }
+
+            processLevel(editor, decoded);
+        }
+    );
+}
+
+// ---------------------------------------------------------------
+// Botao no menu de pausa do editor
+// ---------------------------------------------------------------
+class $modify(DecorPauseLayer, EditorPauseLayer) {
+    bool init(LevelEditorLayer* editor) {
+        if (!EditorPauseLayer::init(editor)) return false;
+
+        auto win = CCDirector::get()->getWinSize();
+        auto menu = CCMenu::create();
+        auto spr = ButtonSprite::create("Copiar decor");
+        spr->setScale(0.7f);
+        auto btn = CCMenuItemSpriteExtra::create(
+            spr, this, menu_selector(DecorPauseLayer::onCopyDecor)
+        );
+        menu->addChild(btn);
+        btn->setPosition({0.f, 0.f});
+        menu->setPosition({win.width - 65.f, win.height - 25.f});
+        this->addChild(menu, 100);
+        return true;
+    }
+
+    void onCopyDecor(CCObject*) {
+        auto holder = std::make_shared<TextInput*>(nullptr);
+
+        auto alert = createQuickPopup(
+            "Copiar tema",
+            "Digite o ID da fase:\n\n\n",
+            "Cancelar", "Copiar",
+            [editor = Ref<LevelEditorLayer>(m_editorLayer), holder](FLAlertLayer*, bool btn2) {
+                if (!btn2) return;
+                int id = 0;
+                if (*holder) id = toInt((*holder)->getString());
+                if (id <= 0) id = static_cast<int>(Mod::get()->getSettingValue<int64_t>("level-id"));
+                startImport(editor, id);
+            },
+            false
+        );
+
+        auto win = CCDirector::get()->getWinSize();
+        auto input = TextInput::create(160.f, "ID da fase", "bigFont.fnt");
+        input->setFilter("0123456789");
+        input->setMaxCharCount(10);
+        input->setPosition({win.width / 2.f, win.height / 2.f - 8.f});
+        alert->m_mainLayer->addChild(input);
+        *holder = input;
+        alert->show();
+    }
+};
