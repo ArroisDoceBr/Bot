@@ -51,7 +51,7 @@ static float toFloat(std::string const& s, float def = 0.f) {
     return static_cast<float>(v);
 }
 
-static std::string fmt(float v) {
+static std::string numStr(float v) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.2f", v);
     return std::string(buf);
@@ -430,9 +430,9 @@ static void processLevel(Ref<LevelEditorLayer> editor, std::string const& decode
             float ox, oy;
             rotCW(p.lx, p.ly, ur, ox, oy);
             std::string s = p.base;
-            s += ",2," + fmt(ux + ox);
-            s += ",3," + fmt(uy + oy);
-            s += ",6," + fmt(ur + p.rr);
+            s += ",2," + numStr(ux + ox);
+            s += ",3," + numStr(uy + oy);
+            s += ",6," + numStr(ur + p.rr);
             s += ",121,1";
             good.push_back(std::move(s));
         }
