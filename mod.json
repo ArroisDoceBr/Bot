@@ -6,11 +6,11 @@
     "mac": "2.2081",
     "ios": "2.2081"
   },
-  "version": "v1.2.0",
+  "version": "v1.3.0",
   "id": "arroisdocebr.decorcopy",
   "name": "Decor Copy",
   "developer": "ArroisDoceBr",
-  "description": "Aprende o estilo de outra fase e aplica nos espinhos da sua.",
+  "description": "Copia o tema de outra fase e sincroniza os efeitos com a sua.",
   "settings": {
     "level-id": {
       "type": "int",
@@ -18,28 +18,48 @@
       "default": 0,
       "min": 0
     },
-    "radius": {
-      "type": "int",
-      "name": "Raio da decoracao",
-      "description": "Distancia em unidades do espinho. 30 = 1 bloco.",
-      "default": 45,
-      "min": 15,
-      "max": 150
+    "copy-colors": {
+      "type": "bool",
+      "name": "Copiar cores do tema",
+      "default": true
     },
-    "max-per-spike": {
-      "type": "int",
-      "name": "Max. objetos por espinho",
-      "default": 50,
-      "min": 3,
-      "max": 300
+    "copy-bg": {
+      "type": "bool",
+      "name": "Copiar fundo e chao",
+      "default": true
     },
-    "templates": {
+    "copy-spike-skin": {
+      "type": "bool",
+      "name": "Visual dos espinhos e serras",
+      "default": true
+    },
+    "overlay-zorder": {
       "type": "int",
-      "name": "Variacoes de estilo",
-      "description": "Quantos modelos de espinho da fase original usar.",
-      "default": 4,
-      "min": 1,
-      "max": 10
+      "name": "Z-order do visual dos espinhos",
+      "description": "Maior = fica por cima do seu espinho.",
+      "default": 10,
+      "min": -50,
+      "max": 50
+    },
+    "copy-effects": {
+      "type": "bool",
+      "name": "Copiar efeitos (cor, pulse, fundo)",
+      "default": true
+    },
+    "copy-shake": {
+      "type": "bool",
+      "name": "Copiar shake",
+      "default": false
+    },
+    "align-portals": {
+      "type": "bool",
+      "name": "Alinhar efeitos pelos portais",
+      "default": true
+    },
+    "delete-my-color-triggers": {
+      "type": "bool",
+      "name": "Apagar MEUS triggers de cor",
+      "default": true
     },
     "chunk-size": {
       "type": "int",
@@ -54,21 +74,6 @@
       "default": 40000,
       "min": 100,
       "max": 500000
-    },
-    "copy-triggers": {
-      "type": "bool",
-      "name": "Copiar efeitos (pulse, shake, cor)",
-      "default": true
-    },
-    "copy-colors": {
-      "type": "bool",
-      "name": "Copiar cores do tema",
-      "default": true
-    },
-    "copy-bg": {
-      "type": "bool",
-      "name": "Copiar fundo e chao",
-      "default": true
     }
   }
 }
